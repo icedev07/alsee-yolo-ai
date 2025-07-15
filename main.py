@@ -5,8 +5,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import os
-import torch.serialization
-torch.serialization.add_safe_globals(['ultralytics.nn.tasks.DetectionModel'])
+from ultralytics import YOLO
 
 # Paths
 PT_MODEL_PATH = "yolo11n.pt"
@@ -25,18 +24,17 @@ def load_image(image_path, img_size=640):
     img_tensor = transform(image)
     return image, img_tensor.unsqueeze(0)  # Add batch dimension
 
-# 2. Inference with PyTorch model
+# 2. Inference with Ultralytics YOLO model
 def run_pytorch_inference(model, img_tensor, orig_image):
-    model.eval()
-    with torch.no_grad():
-        preds = model(img_tensor)[0]  # YOLO models usually return a tuple/list
-    # Post-processing: assuming YOLOv5/YOLOv8 style output [N, 6]: x1, y1, x2, y2, conf, class
-    preds = preds.cpu().numpy()
+    results = model(img_tensor)
     boxes = []
-    for pred in preds:
-        x1, y1, x2, y2, conf, cls = pred
-        if conf > 0.3:  # Confidence threshold
-            boxes.append((x1, y1, x2, y2, conf, int(cls)))
+    for r in results:
+        for box in r.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            conf = box.conf[0].cpu().numpy()
+            cls = int(box.cls[0].cpu().numpy())
+            if conf > 0.3:
+                boxes.append((x1, y1, x2, y2, conf, cls))
     draw_boxes(orig_image, boxes, OUTPUT_PT, "PyTorch")
     print("PyTorch Inference Results:")
     for box in boxes:
@@ -46,7 +44,7 @@ def run_pytorch_inference(model, img_tensor, orig_image):
 # 3. Convert to ONNX
 def convert_to_onnx(model, img_tensor, onnx_path):
     torch.onnx.export(
-        model,
+        model.model,
         img_tensor,
         onnx_path,
         export_params=True,
@@ -69,12 +67,8 @@ def run_onnx_inference(onnx_path, img_tensor, orig_image):
     ort_session = ort.InferenceSession(onnx_path)
     img_numpy = img_tensor.numpy()
     outputs = ort_session.run(None, {'images': img_numpy})
-    preds = outputs[0][0]  # [batch, N, 6] or [N, 6]
-    boxes = []
-    for pred in preds:
-        x1, y1, x2, y2, conf, cls = pred
-        if conf > 0.3:
-            boxes.append((x1, y1, x2, y2, conf, int(cls)))
+    print("ONNX raw output shape:", outputs[0].shape)
+    boxes = postprocess_yolov8_onnx(outputs[0])
     draw_boxes(orig_image, boxes, OUTPUT_ONNX, "ONNX")
     print("ONNX Inference Results:")
     for box in boxes:
@@ -93,13 +87,37 @@ def draw_boxes(image, boxes, output_path, title):
     img.save(output_path)
     print(f"{title} result saved to {output_path}")
 
+def postprocess_yolov8_onnx(output, conf_thres=0.3):
+    # output: [1, 84, 8400] -> [8400, 84]
+    output = output[0]  # remove batch dim, now [84, 8400]
+    output = output.transpose(1, 0)  # [8400, 84]
+    boxes = []
+    for row in output:
+        # YOLOv8 ONNX: [cx, cy, w, h, obj_conf, class_conf_0, ..., class_conf_n]
+        cx, cy, w, h = row[:4]
+        obj_conf = row[4]
+        class_confs = row[5:]
+        class_id = np.argmax(class_confs)
+        class_conf = class_confs[class_id]
+        conf = obj_conf * class_conf
+        if conf > conf_thres:
+            # Convert from [cx, cy, w, h] to [x1, y1, x2, y2]
+            x1 = cx - w / 2
+            y1 = cy - h / 2
+            x2 = cx + w / 2
+            y2 = cy + h / 2
+            # Ensure valid coordinates
+            if x2 > x1 and y2 > y1:
+                boxes.append((x1, y1, x2, y2, conf, class_id))
+    return boxes
+
 def main():
     # Load image
     orig_image, img_tensor = load_image(IMAGE_PATH)
     print("Image loaded and preprocessed.")
 
-    # Load PyTorch model
-    model = torch.load(PT_MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
+    # Load Ultralytics YOLO model
+    model = YOLO(PT_MODEL_PATH)
     print("PyTorch model loaded.")
 
     # PyTorch inference
