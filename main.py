@@ -5,9 +5,11 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import os
+import torch.serialization
+torch.serialization.add_safe_globals(['ultralytics.nn.tasks.DetectionModel'])
 
 # Paths
-PT_MODEL_PATH = "yoldin.pt"
+PT_MODEL_PATH = "yolo11n.pt"
 ONNX_MODEL_PATH = "yoldin.onnx"
 IMAGE_PATH = "image.png"
 OUTPUT_PT = "output_pytorch.png"
@@ -97,7 +99,7 @@ def main():
     print("Image loaded and preprocessed.")
 
     # Load PyTorch model
-    model = torch.load(PT_MODEL_PATH, map_location=torch.device('cpu'))
+    model = torch.load(PT_MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
     print("PyTorch model loaded.")
 
     # PyTorch inference
